@@ -1,0 +1,319 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Private static dance app with CloudFront Free flat-rate pricing. Deploy in us-east-1. Upload assets only after CREATE_COMPLETE and ACTIVE/FREE outputs.",
+  "Parameters": {
+    "AppName": {
+      "Type": "String",
+      "Default": "dance-coach",
+      "AllowedPattern": "[a-z][a-z0-9-]{2,24}",
+      "Description": "Unique application resource prefix, 3 to 25 lowercase letters, digits, and hyphens."
+    },
+    "AnalyticsEnabled": {
+      "Type": "String",
+      "Default": "false",
+      "AllowedValues": ["true", "false"],
+      "Description": "Enable aggregate collection only after publishing the operator identity and privacy contact. False drops events at the edge without invoking Lambda."
+    }
+  },
+  "Resources": {
+    "Assets": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "OwnershipControls": { "Rules": [{ "ObjectOwnership": "BucketOwnerEnforced" }] },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "IgnorePublicAcls": true,
+          "BlockPublicPolicy": true,
+          "RestrictPublicBuckets": true
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [{ "ServerSideEncryptionByDefault": { "SSEAlgorithm": "AES256" } }]
+        }
+      }
+    },
+    "OriginAccess": {
+      "Type": "AWS::CloudFront::OriginAccessControl",
+      "Properties": {
+        "OriginAccessControlConfig": {
+          "Name": { "Fn::Sub": "${AppName}-${AWS::AccountId}-origin" },
+          "OriginAccessControlOriginType": "s3",
+          "SigningBehavior": "always",
+          "SigningProtocol": "sigv4"
+        }
+      }
+    },
+    "WebAcl": {
+      "Type": "AWS::WAFv2::WebACL",
+      "Properties": {
+        "Name": { "Fn::Sub": "${AppName}-${AWS::AccountId}" },
+        "Scope": "CLOUDFRONT",
+        "DefaultAction": { "Allow": {} },
+        "VisibilityConfig": { "SampledRequestsEnabled": false, "CloudWatchMetricsEnabled": false, "MetricName": "DanceApp" },
+        "Rules": [{
+          "Name": "RequestRateLimit",
+          "Priority": 0,
+          "Action": { "Block": {} },
+          "Statement": { "RateBasedStatement": { "AggregateKeyType": "IP", "Limit": 2000, "EvaluationWindowSec": 300 } },
+          "VisibilityConfig": { "SampledRequestsEnabled": false, "CloudWatchMetricsEnabled": false, "MetricName": "RequestRateLimit" }
+        }]
+      }
+    },
+    "PrivacyHeaders": {
+      "Type": "AWS::CloudFront::Function",
+      "Properties": {
+        "Name": { "Fn::Sub": "${AppName}-${AWS::AccountId}-headers" },
+        "AutoPublish": true,
+        "FunctionConfig": { "Comment": "Local-only camera dance app security headers", "Runtime": "cloudfront-js-2.0" },
+        "FunctionCode": "function handler(event) {\n  var response = event.response;\n  var headers = response.headers;\n  headers['content-security-policy'] = {value: \"default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; frame-src 'none'; form-action 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; connect-src 'self'; worker-src 'self' blob:; manifest-src 'self'; upgrade-insecure-requests\"};\n  headers['permissions-policy'] = {value: 'camera=(self), microphone=(), fullscreen=(self), autoplay=(self), accelerometer=(), gyroscope=(), geolocation=(), payment=(), usb=()'};\n  headers['referrer-policy'] = {value: 'no-referrer'};\n  headers['x-frame-options'] = {value: 'DENY'};\n  headers['x-xss-protection'] = {value: '0'};\n  return response;\n}\n"
+      }
+    },
+    "AnalyticsRequestGuard": {
+      "Type": "AWS::CloudFront::Function",
+      "Properties": {
+        "Name": { "Fn::Sub": "${AppName}-${AWS::AccountId}-event-guard" },
+        "AutoPublish": true,
+        "FunctionConfig": { "Comment": "Reject invalid analytics requests before metered origin execution", "Runtime": "cloudfront-js-2.0" },
+        "FunctionCode": { "Fn::Sub": "function handler(event) {\n  var request = event.request;\n  var headers = request.headers;\n  function header(name) { var item = headers[name]; return item && !item.multiValue ? item.value : ''; }\n  function reject(status) { return {statusCode: status, headers: {'cache-control': {value: 'no-store'}, 'content-security-policy': {value: \"default-src 'none'; frame-ancestors 'none'\"}, 'x-content-type-options': {value: 'nosniff'}, 'strict-transport-security': {value: 'max-age=31536000'}, 'referrer-policy': {value: 'no-referrer'}}, body: ''}; }\n  if (request.method !== 'POST') return reject(405);\n  if (header('origin') !== 'https://d2cxbgxgnz3xxl.cloudfront.net') return reject(403);\n  if (header('content-type').split(';')[0].trim().toLowerCase() !== 'application/json') return reject(415);\n  var length = header('content-length');\n  if (headers['content-length'] && (!/^[1-9][0-9]{0,2}$/.test(length) || Number(length) > 512)) return reject(413);\n  if (!/^[a-f0-9]{64}$/.test(header('x-amz-content-sha256'))) return reject(400);\n  if ('${AnalyticsEnabled}' !== 'true') return reject(204);\n  request.cookies = {};\n  request.querystring = {};\n  delete headers.authorization;\n  delete headers.referer;\n  return request;\n}\n" }
+      }
+    },
+    "Distribution": {
+      "Type": "AWS::CloudFront::Distribution",
+      "Properties": {
+        "DistributionConfig": {
+          "Comment": { "Fn::Sub": "${AppName}: local-only dance coaching" },
+          "Enabled": true,
+          "DefaultRootObject": "index.html",
+          "HttpVersion": "http2and3",
+          "IPV6Enabled": true,
+          "WebACLId": { "Fn::GetAtt": ["WebAcl", "Arn"] },
+          "Origins": [{
+            "Id": "PrivateAssets",
+            "DomainName": { "Fn::GetAtt": ["Assets", "RegionalDomainName"] },
+            "OriginAccessControlId": { "Ref": "OriginAccess" },
+            "S3OriginConfig": { "OriginAccessIdentity": "" }
+          }, {
+            "Id": "AnonymousEvents",
+            "DomainName": { "Fn::Select": [2, { "Fn::Split": ["/", { "Fn::GetAtt": ["AnalyticsUrl", "FunctionUrl"] }] }] },
+            "OriginAccessControlId": { "Ref": "AnalyticsOriginAccess" },
+            "ConnectionAttempts": 1,
+            "ConnectionTimeout": 3,
+            "CustomOriginConfig": {
+              "HTTPSPort": 443,
+              "OriginProtocolPolicy": "https-only",
+              "OriginSSLProtocols": ["TLSv1.2"],
+              "OriginReadTimeout": 5,
+              "OriginKeepaliveTimeout": 5
+            }
+          }],
+          "DefaultCacheBehavior": {
+            "TargetOriginId": "PrivateAssets",
+            "ViewerProtocolPolicy": "redirect-to-https",
+            "AllowedMethods": ["GET", "HEAD"],
+            "CachedMethods": ["GET", "HEAD"],
+            "Compress": true,
+            "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
+            "ResponseHeadersPolicyId": "67f7725c-6f97-4210-82d7-5512b31e9d03",
+            "FunctionAssociations": [{ "EventType": "viewer-response", "FunctionARN": { "Fn::GetAtt": ["PrivacyHeaders", "FunctionMetadata.FunctionARN"] } }]
+          },
+          "CacheBehaviors": [{
+            "PathPattern": "/events",
+            "TargetOriginId": "AnonymousEvents",
+            "ViewerProtocolPolicy": "https-only",
+            "AllowedMethods": ["GET", "HEAD", "OPTIONS", "PUT", "PATCH", "POST", "DELETE"],
+            "CachedMethods": ["GET", "HEAD"],
+            "Compress": false,
+            "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+            "OriginRequestPolicyId": "b689b0a8-53d0-40ab-baf2-68738e2966ac",
+            "ResponseHeadersPolicyId": "67f7725c-6f97-4210-82d7-5512b31e9d03",
+            "FunctionAssociations": [
+              { "EventType": "viewer-request", "FunctionARN": { "Fn::GetAtt": ["AnalyticsRequestGuard", "FunctionMetadata.FunctionARN"] } },
+              { "EventType": "viewer-response", "FunctionARN": { "Fn::GetAtt": ["PrivacyHeaders", "FunctionMetadata.FunctionARN"] } }
+            ]
+          }, {
+            "PathPattern": "sw.js",
+            "TargetOriginId": "PrivateAssets",
+            "ViewerProtocolPolicy": "redirect-to-https",
+            "AllowedMethods": ["GET", "HEAD"],
+            "CachedMethods": ["GET", "HEAD"],
+            "Compress": true,
+            "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+            "ResponseHeadersPolicyId": "67f7725c-6f97-4210-82d7-5512b31e9d03",
+            "FunctionAssociations": [{ "EventType": "viewer-response", "FunctionARN": { "Fn::GetAtt": ["PrivacyHeaders", "FunctionMetadata.FunctionARN"] } }]
+          }],
+          "ViewerCertificate": { "CloudFrontDefaultCertificate": true }
+        }
+      }
+    },
+    "BucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": { "Ref": "Assets" },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Sid": "ReadOnlyFromThisDistribution",
+            "Effect": "Allow",
+            "Principal": { "Service": "cloudfront.amazonaws.com" },
+            "Action": "s3:GetObject",
+            "Resource": { "Fn::Sub": "${Assets.Arn}/*" },
+            "Condition": { "StringEquals": { "AWS:SourceArn": { "Fn::Sub": "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}" } } }
+          }, {
+            "Sid": "RequireHttps",
+            "Effect": "Deny",
+            "Principal": "*",
+            "Action": "s3:*",
+            "Resource": [{ "Fn::GetAtt": ["Assets", "Arn"] }, { "Fn::Sub": "${Assets.Arn}/*" }],
+            "Condition": { "Bool": { "aws:SecureTransport": "false" } }
+          }]
+        }
+      }
+    },
+    "AnalyticsTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "BillingMode": "PROVISIONED",
+        "AttributeDefinitions": [
+          { "AttributeName": "app", "AttributeType": "S" },
+          { "AttributeName": "key", "AttributeType": "S" }
+        ],
+        "KeySchema": [
+          { "AttributeName": "app", "KeyType": "HASH" },
+          { "AttributeName": "key", "KeyType": "RANGE" }
+        ],
+        "ProvisionedThroughput": { "ReadCapacityUnits": 2, "WriteCapacityUnits": 1 },
+        "SSESpecification": { "SSEEnabled": false },
+        "TimeToLiveSpecification": { "AttributeName": "expires", "Enabled": true },
+        "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": false }
+      }
+    },
+    "AnalyticsCollectorRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{ "Effect": "Allow", "Principal": { "Service": "lambda.amazonaws.com" }, "Action": "sts:AssumeRole" }]
+        },
+        "Policies": [{
+          "PolicyName": "IncrementAnonymousCounts",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{ "Effect": "Allow", "Action": ["dynamodb:UpdateItem"], "Resource": { "Fn::GetAtt": ["AnalyticsTable", "Arn"] } }]
+          }
+        }]
+      }
+    },
+    "AnalyticsCollector": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "FunctionName": { "Fn::Sub": "${AppName}-${AWS::AccountId}-events" },
+        "Description": "Anonymous daily counts only; no request or camera logs.",
+        "Runtime": "python3.12",
+        "Handler": "index.handler",
+        "Role": { "Fn::GetAtt": ["AnalyticsCollectorRole", "Arn"] },
+        "MemorySize": 128,
+        "Timeout": 3,
+        "Environment": { "Variables": { "TABLE_NAME": { "Ref": "AnalyticsTable" }, "ANALYTICS_ENABLED": { "Ref": "AnalyticsEnabled" } } },
+        "Code": { "ZipFile": "\"\"\"Collect daily counts only. Never log requests, event payloads, or exceptions.\"\"\"\n\nimport base64\nimport binascii\nfrom datetime import datetime, timedelta, timezone\nimport json\nimport os\n\nimport boto3\nfrom botocore.config import Config\n\n\nORIGIN = \"https://d2cxbgxgnz3xxl.cloudfront.net\"\nEVENTS = {\"visit\", \"lesson_open\", \"session_start\", \"session_finish\"}\nLESSONS = {\"all\", \"step-touch\", \"salsa\", \"house\", \"disco\", \"merengue\", \"seated\"}\nSOURCES = {\"direct\", \"google\", \"microsoft\", \"reddit\", \"meta\", \"chatgpt\", \"other\"}\n_dynamodb = None\n\n\ndef client():\n    global _dynamodb\n    if _dynamodb is None:\n        _dynamodb = boto3.client(\n            \"dynamodb\",\n            config=Config(connect_timeout=0.4, read_timeout=0.6,\n                          retries={\"max_attempts\": 0, \"mode\": \"standard\"}),\n        )\n    return _dynamodb\n\n\ndef response(status):\n    return {\"statusCode\": status, \"headers\": {\"cache-control\": \"no-store\"}, \"body\": \"\"}\n\n\ndef unique_object(pairs):\n    result = {}\n    for name, value in pairs:\n        if name in result:\n            raise ValueError(\"Duplicate field\")\n        result[name] = value\n    return result\n\n\ndef payload(event):\n    body = event.get(\"body\", \"\")\n    if not isinstance(body, str) or len(body) > 684:\n        raise ValueError(\"Invalid body\")\n    raw = base64.b64decode(body, validate=True) if event.get(\"isBase64Encoded\") else body.encode(\"utf-8\")\n    if len(raw) > 512:\n        raise ValueError(\"Body too large\")\n    data = json.loads(raw.decode(\"utf-8\"), object_pairs_hook=unique_object)\n    if not isinstance(data, dict):\n        raise ValueError(\"Expected object\")\n    kind = data.get(\"event\")\n    if not isinstance(kind, str) or kind not in EVENTS:\n        raise ValueError(\"Invalid event\")\n    if type(data.get(\"consent\")) is not int or data[\"consent\"] != 2:\n        raise ValueError(\"Current consent required\")\n    allowed = {\"event\", \"lesson\", \"source\", \"consent\"} if kind == \"visit\" else {\"event\", \"lesson\", \"consent\"}\n    if kind == \"session_finish\":\n        allowed |= {\"seconds\", \"completed\"}\n    if data.keys() - allowed:\n        raise ValueError(\"Unknown field\")\n    lesson = data.get(\"lesson\", \"all\" if kind == \"visit\" else None)\n    source = data.get(\"source\", \"direct\")\n    if not isinstance(lesson, str) or lesson not in LESSONS:\n        raise ValueError(\"Invalid lesson\")\n    if not isinstance(source, str) or source not in SOURCES:\n        raise ValueError(\"Invalid source\")\n    if kind == \"visit\" and lesson != \"all\":\n        raise ValueError(\"Visit is not lesson-specific\")\n    if kind != \"visit\" and lesson == \"all\":\n        raise ValueError(\"Lesson event needs a lesson\")\n    seconds, completed = 0, False\n    if kind == \"session_finish\":\n        seconds, completed = data.get(\"seconds\"), data.get(\"completed\")\n        if type(seconds) is not int or not 0 <= seconds <= 600 or type(completed) is not bool:\n            raise ValueError(\"Invalid finish\")\n    return kind, lesson, source, seconds, completed\n\n\ndef handler(event, context):\n    # Fail closed, including requests from cached clients with older defaults.\n    if os.environ.get(\"ANALYTICS_ENABLED\") != \"true\":\n        return response(204)\n    # CloudFront OAC + AWS_IAM authentication is enforced by the function URL.\n    if event.get(\"requestContext\", {}).get(\"http\", {}).get(\"method\") != \"POST\":\n        return response(405)\n    headers = {name.lower(): value for name, value in (event.get(\"headers\") or {}).items()}\n    if headers.get(\"origin\") not in (None, ORIGIN):\n        return response(403)\n    content_type = headers.get(\"content-type\", \"\").split(\";\", 1)[0].strip().lower()\n    if content_type != \"application/json\":\n        return response(415)\n    try:\n        kind, lesson, source, seconds, completed = payload(event)\n    except (ValueError, TypeError, UnicodeError, binascii.Error, RecursionError):\n        return response(400)\n    day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)\n    try:\n        client().update_item(\n            TableName=os.environ[\"TABLE_NAME\"],\n            Key={\"app\": {\"S\": \"movana\"}, \"key\": {\"S\": f\"{day.date()}#{kind}#{lesson}#{source}\"}},\n            UpdateExpression=\"SET #expires = :expires ADD #count :one, #seconds :seconds, #completed :completed\",\n            ExpressionAttributeNames={\"#expires\": \"expires\", \"#count\": \"count\", \"#seconds\": \"seconds\", \"#completed\": \"completed\"},\n            ExpressionAttributeValues={\n                \":expires\": {\"N\": str(int((day + timedelta(days=90)).timestamp()))},\n                \":one\": {\"N\": \"1\"}, \":seconds\": {\"N\": str(seconds)}, \":completed\": {\"N\": str(int(completed))},\n            },\n        )\n    except Exception:\n        # ponytail: drop counts on throttling/outages; no retry queue or raw-event storage.\n        pass\n    return response(204)\n" }
+      }
+    },
+    "AnalyticsUrl": {
+      "Type": "AWS::Lambda::Url",
+      "Properties": { "AuthType": "AWS_IAM", "TargetFunctionArn": { "Fn::GetAtt": ["AnalyticsCollector", "Arn"] } }
+    },
+    "AnalyticsOriginAccess": {
+      "Type": "AWS::CloudFront::OriginAccessControl",
+      "Properties": {
+        "OriginAccessControlConfig": {
+          "Name": { "Fn::Sub": "${AppName}-${AWS::AccountId}-events" },
+          "OriginAccessControlOriginType": "lambda",
+          "SigningBehavior": "always",
+          "SigningProtocol": "sigv4"
+        }
+      }
+    },
+    "AnalyticsUrlPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunctionUrl",
+        "FunctionName": { "Ref": "AnalyticsCollector" },
+        "FunctionUrlAuthType": "AWS_IAM",
+        "Principal": "cloudfront.amazonaws.com",
+        "SourceArn": { "Fn::Sub": "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}" }
+      }
+    },
+    "AnalyticsInvokePermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": { "Ref": "AnalyticsCollector" },
+        "InvokedViaFunctionUrl": true,
+        "Principal": "cloudfront.amazonaws.com",
+        "SourceArn": { "Fn::Sub": "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}" }
+      }
+    },
+    "AnalyticsDashboardRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{ "Effect": "Allow", "Principal": { "Service": "lambda.amazonaws.com" }, "Action": "sts:AssumeRole" }]
+        },
+        "Policies": [{
+          "PolicyName": "ReadAnonymousCounts",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{ "Effect": "Allow", "Action": ["dynamodb:Query"], "Resource": { "Fn::GetAtt": ["AnalyticsTable", "Arn"] } }]
+          }
+        }]
+      }
+    },
+    "AnalyticsDashboardFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "FunctionName": { "Fn::Sub": "customWidget-${AppName}-${AWS::AccountId}-usage" },
+        "Description": "Read-only, private CloudWatch custom widget for anonymous usage.",
+        "Runtime": "python3.12",
+        "Handler": "index.handler",
+        "Role": { "Fn::GetAtt": ["AnalyticsDashboardRole", "Arn"] },
+        "MemorySize": 128,
+        "Timeout": 10,
+        "Environment": { "Variables": { "TABLE_NAME": { "Ref": "AnalyticsTable" }, "ANALYTICS_ENABLED": { "Ref": "AnalyticsEnabled" } } },
+        "Code": { "ZipFile": "\"\"\"Private CloudWatch custom widget over daily aggregates, with no raw event data.\"\"\"\n\nfrom collections import defaultdict\nfrom datetime import datetime, timedelta, timezone\nfrom html import escape\nimport os\n\nimport boto3\nfrom botocore.config import Config\n\n\nLESSONS = {\n    \"step-touch\": \"Step-touch\", \"salsa\": \"Salsa side basic\", \"house\": \"House groove\",\n    \"disco\": \"Disco reaches\", \"merengue\": \"Merengue steps\", \"seated\": \"Seated groove\", \"all\": \"All lessons\",\n}\nSOURCES = {\"direct\": \"Direct / untagged\", \"google\": \"Google\", \"microsoft\": \"Microsoft\", \"reddit\": \"Reddit\",\n           \"meta\": \"Meta\", \"chatgpt\": \"ChatGPT\", \"other\": \"Other\"}\nEVENTS = {\"visit\", \"lesson_open\", \"session_start\", \"session_finish\"}\nDOCS = \"\"\"# Movana anonymous activity\n\nShows the last 30 UTC calendar days, including today. No widget parameters are needed.\nVisits count page loads, including repeats; they are not unique people. Sources are\ncoarse campaign labels, not stored referrers. There are no user or device identifiers.\nPractice time comes from submitted session endings, so closed tabs and lost connections\ncan undercount. Offline use, opt-outs, ad blockers, throttling, and outages can omit counts.\nTests and bots can count. Daily aggregates have a 90-day expiry; AWS removes expired rows\nasynchronously. This widget is available only to authorized AWS users.\nHistorical totals may include collection before the current consent gate was introduced.\n\"\"\"\n_dynamodb = None\n\n\ndef client():\n    global _dynamodb\n    if _dynamodb is None:\n        _dynamodb = boto3.client(\"dynamodb\", config=Config(\n            connect_timeout=1, read_timeout=2, retries={\"max_attempts\": 0, \"mode\": \"standard\"}))\n    return _dynamodb\n\n\ndef number(item, name):\n    try:\n        return max(0, int(item.get(name, {}).get(\"N\", \"0\")))\n    except (ValueError, TypeError, AttributeError):\n        return 0\n\n\ndef table(caption, headers, rows):\n    head = \"\".join(f\"<th scope='col'>{escape(str(value))}</th>\" for value in headers)\n    body = \"\".join(\"<tr>\" + \"\".join(f\"<td>{escape(str(value))}</td>\" for value in row) + \"</tr>\" for row in rows)\n    return f\"<table><caption>{escape(caption)}</caption><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>\"\n\n\ndef handler(event, context):\n    enabled = os.environ.get(\"ANALYTICS_ENABLED\") == \"true\"\n    state = (\"Collection enabled: new events require consent version 2.\"\n             if enabled else \"Collection paused: no new usage events are stored.\")\n    notice = f\"<p class='note'><b>{state}</b> Historical totals may include earlier collection, tests and bots.</p>\"\n    # CloudWatch sends describe when its Get documentation button is used.\n    if isinstance(event, dict) and \"describe\" in event:\n        return {\"markdown\": f\"**{state}**\\n\\n{DOCS}\"}\n    today = datetime.now(timezone.utc).date()\n    first = today - timedelta(days=29)\n    request = {\n        \"TableName\": os.environ[\"TABLE_NAME\"],\n        \"KeyConditionExpression\": \"#app = :app AND #key BETWEEN :first AND :last\",\n        \"ExpressionAttributeNames\": {\"#app\": \"app\", \"#key\": \"key\"},\n        \"ExpressionAttributeValues\": {\":app\": {\"S\": \"movana\"}, \":first\": {\"S\": f\"{first}#\"}, \":last\": {\"S\": f\"{today}#~\"}},\n        \"Limit\": 1000,\n    }\n    items = []\n    try:\n        # The bounded schema allows at most 750 rows in this 30-day window.\n        for _ in range(3):\n            result = client().query(**request)\n            items.extend(result.get(\"Items\", []))\n            if not result.get(\"LastEvaluatedKey\"):\n                break\n            request[\"ExclusiveStartKey\"] = result[\"LastEvaluatedKey\"]\n        else:\n            return notice + \"<p>Statistics are temporarily unavailable. Try refreshing later.</p>\"\n    except Exception:\n        return notice + \"<p>Statistics are temporarily unavailable. Try refreshing later.</p>\"\n\n    totals = defaultdict(int)\n    lessons = defaultdict(lambda: defaultdict(int))\n    days = defaultdict(lambda: defaultdict(int))\n    sources = defaultdict(int)\n    for item in items:\n        try:\n            day, kind, lesson, source = item[\"key\"][\"S\"].split(\"#\")\n            if not (str(first) <= day <= str(today)) or kind not in EVENTS or lesson not in LESSONS or source not in SOURCES:\n                continue\n            datetime.strptime(day, \"%Y-%m-%d\")\n        except (KeyError, ValueError, TypeError, AttributeError):\n            continue\n        count = number(item, \"count\")\n        totals[kind] += count\n        days[day][kind] += count\n        if kind == \"visit\":\n            sources[source] += count\n        else:\n            lessons[lesson][kind] += count\n        if kind == \"session_finish\":\n            for values in (totals, days[day], lessons[lesson]):\n                values[\"seconds\"] += number(item, \"seconds\")\n                values[\"completed\"] += number(item, \"completed\")\n\n    cards = [(\"Visits\", f\"{totals['visit']:,}\"), (\"Lesson opens\", f\"{totals['lesson_open']:,}\"),\n             (\"Practice starts\", f\"{totals['session_start']:,}\"), (\"Completed sessions\", f\"{totals['completed']:,}\"),\n             (\"Practice minutes\", f\"{totals['seconds'] / 60:,.1f}\")]\n    summary = \"\".join(f\"<div class='card'><span>{label}</span><strong>{value}</strong></div>\" for label, value in cards)\n    lesson_rows = [(label, lessons[key]['lesson_open'], lessons[key]['session_start'], lessons[key]['session_finish'],\n                    lessons[key]['completed'], f\"{lessons[key]['seconds'] / 60:,.1f}\")\n                   for key, label in LESSONS.items() if key != \"all\" or key in lessons]\n    daily_rows = []\n    for offset in range(30):\n        day = str(today - timedelta(days=offset))\n        values = days[day]\n        daily_rows.append((day, values['visit'], values['session_start'], values['session_finish'],\n                           values['completed'], f\"{values['seconds'] / 60:,.1f}\"))\n    return (\n        \"<style>.movana{font-family:system-ui,sans-serif;padding:8px}.movana .cards{display:flex;flex-wrap:wrap;gap:12px}\"\n        \".movana .card{min-width:120px;padding:14px;border:1px solid #8298a5;border-radius:12px}\"\n        \".movana strong{display:block;font-size:26px}.movana table{width:100%;margin-top:22px;border-collapse:collapse}\"\n        \".movana caption{text-align:left;font-weight:700;margin-bottom:8px}.movana td,.movana th{text-align:left;padding:7px;border-bottom:1px solid #8298a5}\"\n        \".movana .note{font-size:13px;line-height:1.5}</style><section class='movana'>\"\n        f\"<h2>Movana activity</h2>{notice}<p>{first} to {today} \u00b7 UTC \u00b7 Last 30 days</p><div class='cards'>{summary}</div>\"\n        \"<p class='note'>Anonymous counts, not unique people. Visits are page loads; repeat visits, tests, and bots can count. \"\n        \"Offline use, opt-outs, ad blockers, closed tabs, lost connections, and throttling can omit counts. Practice time is submitted when a session ends. \"\n        \"Sources are coarse campaign labels; referrers are not stored. No recordings or movement data are collected. \"\n        \"Daily aggregates have a 90-day expiry; AWS removes expired rows asynchronously. Use the dashboard Refresh button to update.</p>\"\n        + table(\"Lesson usage\", (\"Lesson\", \"Opens\", \"Starts\", \"Ended\", \"Completed\", \"Minutes\"), lesson_rows)\n        + table(\"Visit sources\", (\"Source\", \"Visits\"), [(label, sources[key]) for key, label in SOURCES.items()])\n        + table(\"Daily activity\", (\"UTC day\", \"Visits\", \"Starts\", \"Ended\", \"Completed\", \"Minutes\"), daily_rows)\n        + \"</section>\"\n    )\n" }
+      }
+    },
+    "UsageDashboard": {
+      "Type": "AWS::CloudWatch::Dashboard",
+      "Properties": {
+        "DashboardName": "Movana-Usage",
+        "DashboardBody": { "Fn::Sub": "{\"start\":\"-P30D\",\"periodOverride\":\"inherit\",\"widgets\":[{\"type\":\"text\",\"x\":0,\"y\":0,\"width\":24,\"height\":2,\"properties\":{\"markdown\":\"# Movana \u00b7 the world moves with you\\nAnonymous visit and lesson counts. No accounts, identifiers, camera, microphone or movement data. Allow the custom widget to display totals; only your signed-in AWS console can read them.\"}},{\"type\":\"custom\",\"x\":0,\"y\":2,\"width\":24,\"height\":12,\"properties\":{\"endpoint\":\"${AnalyticsDashboardFunction.Arn}\",\"title\":\"Anonymous visits and lesson usage\",\"params\":{},\"updateOn\":{\"refresh\":true,\"resize\":false,\"timeRange\":true}}},{\"type\":\"metric\",\"x\":0,\"y\":14,\"width\":8,\"height\":6,\"properties\":{\"title\":\"All CDN requests (includes assets and bots)\",\"region\":\"us-east-1\",\"view\":\"timeSeries\",\"stat\":\"Sum\",\"period\":86400,\"metrics\":[[\"AWS/CloudFront\",\"Requests\",\"DistributionId\",\"${Distribution}\",\"Region\",\"Global\"]]}},{\"type\":\"metric\",\"x\":8,\"y\":14,\"width\":8,\"height\":6,\"properties\":{\"title\":\"CDN data delivered\",\"region\":\"us-east-1\",\"view\":\"timeSeries\",\"stat\":\"Sum\",\"period\":86400,\"metrics\":[[\"AWS/CloudFront\",\"BytesDownloaded\",\"DistributionId\",\"${Distribution}\",\"Region\",\"Global\"]]}},{\"type\":\"metric\",\"x\":16,\"y\":14,\"width\":8,\"height\":6,\"properties\":{\"title\":\"Server error rate\",\"region\":\"us-east-1\",\"view\":\"timeSeries\",\"stat\":\"Average\",\"period\":3600,\"metrics\":[[\"AWS/CloudFront\",\"5xxErrorRate\",\"DistributionId\",\"${Distribution}\",\"Region\",\"Global\"]]}}]}" }
+      }
+    },
+    "FreeSubscription": {
+      "Type": "AWS::PricingPlanManager::Subscription",
+      "DependsOn": "BucketPolicy",
+      "Properties": {
+        "PlanFamily": "CloudFront",
+        "PlanTier": "FREE",
+        "UsageLevel": "DEFAULT",
+        "ResourceArns": [
+          { "Fn::Sub": "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}" },
+          { "Fn::GetAtt": ["WebAcl", "Arn"] }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "BucketName": { "Value": { "Ref": "Assets" } },
+    "DistributionId": { "Value": { "Ref": "Distribution" } },
+    "AppUrl": { "Value": { "Fn::Sub": "https://${Distribution.DomainName}" } },
+    "SubscriptionArn": { "Value": { "Ref": "FreeSubscription" } },
+    "SubscriptionStatus": { "Value": { "Fn::GetAtt": ["FreeSubscription", "Status"] } },
+    "SubscriptionPlan": { "Value": { "Fn::GetAtt": ["FreeSubscription", "CurrentPlanTier"] } },
+    "AnalyticsTableName": { "Value": { "Ref": "AnalyticsTable" } },
+    "AnalyticsCollectorName": { "Value": { "Ref": "AnalyticsCollector" } },
+    "AnalyticsDashboardFunctionName": { "Value": { "Ref": "AnalyticsDashboardFunction" } },
+    "UsageDashboardUrl": { "Value": { "Fn::Sub": "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/Movana-Usage" } }
+  }
+}
