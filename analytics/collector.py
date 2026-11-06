@@ -109,6 +109,6 @@ def handler(event, context):
             },
         )
     except Exception:
-        # ponytail: drop counts on throttling/outages; no retry queue or raw-event storage.
+        # Drop counts on throttling/outages; no retry queue or raw-event storage.
         pass
     return response(204)
