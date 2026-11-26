@@ -15,7 +15,7 @@ after(async () => {
 });
 for (const [file, content] of Object.entries({
   'index.html': '<html>Movana test</html>', 'assets/app.js': 'app',
-  'models/pose.task': 'model', 'mediapipe/wasm/vision.wasm': 'wasm',
+  'assets/vision/release/pose.task': 'model', 'assets/vision/release/wasm/vision.wasm': 'wasm',
 })) {
   const target = join(directory, 'dist', file);
   await mkdir(dirname(target), { recursive: true });
@@ -59,7 +59,7 @@ test('worker only caches build assets and canonicalizes query variants', async (
   await install;
   assert.ok(f.installed.includes('/index.html'));
   assert.ok(f.installed.includes('/assets/app.js'));
-  assert.ok(!f.installed.some(key => /models|mediapipe/.test(key)), 'Tracking binaries must stay lazy');
+  assert.ok(!f.installed.some(key => key.startsWith('/assets/vision/')), 'Tracking binaries must stay lazy');
   for (const path of ['/events', '/unknown.js', '/unknown?private=value', 'https://other.test/assets/app.js']) {
     assert.equal(await f.request(path), undefined, 'Unknown and external resources are not intercepted');
   }
@@ -71,8 +71,11 @@ test('worker only caches build assets and canonicalizes query variants', async (
   assert.equal(f.fetched.length, 1, 'Query variants reuse one asset entry');
   assert.equal(f.fetched[0].request, '/assets/app.js');
   assert.deepEqual(f.written, ['/assets/app.js']);
-  assert.equal((await f.request('/models/pose.task?private=three')).body, 'network');
-  assert.deepEqual(f.written, ['/assets/app.js', '/models/pose.task']);
+  assert.equal((await f.request('/assets/vision/release/pose.task?private=three')).body, 'network');
+  assert.deepEqual(f.written, ['/assets/app.js', '/assets/vision/release/pose.task']);
+  f.state.networkFails = true;
+  assert.equal((await f.request('/assets/vision/release/pose.task')).body, 'network');
+  assert.equal(await f.request('/assets/vision/old-release/pose.task'), undefined);
   assert.ok([...f.saved.keys()].every(key => !key.includes('?')));
 });
 

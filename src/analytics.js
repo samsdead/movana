@@ -3,17 +3,21 @@ const SOURCES={google:'google',microsoft:'microsoft',bing:'microsoft',reddit:'re
 // Keep collection paused until the public controller notice is complete.
 export const COLLECTION_ENABLED=false;
 export const CONSENT_VERSION=2;
-let pagePreference;
-export function setUsagePreference(enabled){pagePreference=enabled===true;}
+const ANALYTICS_ORIGIN=import.meta.env.VITE_ANALYTICS_ORIGIN||'https://d2cxbgxgnz3xxl.cloudfront.net';
+let localOptOut=false;
+export function setUsagePreference(enabled){localOptOut=enabled===false;}
 export function browserOptOut(){return navigator.doNotTrack==='1'||window.doNotTrack==='1'||navigator.globalPrivacyControl===true;}
-export function campaignSource(){const source=new URLSearchParams(location.search).get('utm_source');return source?(SOURCES[source.toLowerCase()]||'other'):'direct';}
+export function campaignSource(){
+  const source=new URLSearchParams(location.search).get('utm_source')?.toLowerCase();
+  if(!source)return 'direct';
+  return Object.hasOwn(SOURCES,source)?SOURCES[source]:'other';
+}
 export function trackingAllowed(){
-  if(!COLLECTION_ENABLED||browserOptOut())return false;
-  if(pagePreference!==undefined)return pagePreference;
+  if(!COLLECTION_ENABLED||localOptOut||browserOptOut())return false;
   try{const saved=JSON.parse(localStorage.getItem('movana-settings')||'{}');return saved?.analytics===true&&saved?.analyticsConsent===CONSENT_VERSION;}catch{return false;}
 }
 export async function track(event,details={}){
-  if(!import.meta.env.PROD||location.hostname!=='d2cxbgxgnz3xxl.cloudfront.net'||!trackingAllowed())return;
+  if(!import.meta.env.PROD||location.protocol!=='https:'||location.origin!==ANALYTICS_ORIGIN||!trackingAllowed())return;
   try{
     const body=JSON.stringify({event,consent:CONSENT_VERSION,...details});
     // CloudFront's private Lambda origin signs POST requests using this body hash.

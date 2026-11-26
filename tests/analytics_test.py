@@ -109,6 +109,15 @@ class AnalyticsTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(call))
         self.assertEqual(set(call["ExpressionAttributeNames"].values()), {"expires", "count", "seconds", "completed"})
 
+    def test_collector_accepts_only_the_configured_custom_origin(self):
+        event = request({"event": "visit"})
+        event["headers"]["origin"] = "https://dance.example"
+        with patch.dict(os.environ, {"APP_DOMAIN": ""}):
+            self.assertEqual(collector.handler(event, None)["statusCode"], 403)
+        with patch.dict(os.environ, {"APP_DOMAIN": "dance.example"}):
+            self.assertEqual(collector.handler(event, None)["statusCode"], 204)
+        collector._dynamodb.update_item.assert_called_once()
+
     def test_base64_and_content_type_parameter(self):
         body = base64.b64encode(b'{"event":"visit","consent":2}').decode()
         event = request({}, body=body, isBase64Encoded=True, headers={"Content-Type": "application/json; charset=UTF-8"})

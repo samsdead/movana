@@ -62,9 +62,9 @@ export default function Studio({lesson,settings,onSettings,onExit}){
       // Camera use still works if private browsing or full storage prevents offline saving.
       if(import.meta.env.PROD&&'serviceWorker'in navigator&&!navigator.serviceWorker.controller){await new Promise(resolve=>{const start=performance.now();const check=()=>{if(navigator.serviceWorker.controller||generation!==cameraGeneration.current||performance.now()-start>8000)resolve();else setTimeout(check,100);};check();});}
       if(generation!==cameraGeneration.current)return;
-      const {FilesetResolver,PoseLandmarker}=await import('@mediapipe/tasks-vision');const files=await FilesetResolver.forVisionTasks('/mediapipe/wasm');
+      const {FilesetResolver,PoseLandmarker}=await import('@mediapipe/tasks-vision');const files=await FilesetResolver.forVisionTasks(`${__MOVANA_VISION_ROOT__}/wasm`);
       if(generation!==cameraGeneration.current)return;
-      let model;const options={baseOptions:{modelAssetPath:'/models/pose_landmarker_lite.task',delegate:'GPU'},runningMode:'VIDEO',numPoses:1,minPoseDetectionConfidence:.6,minPosePresenceConfidence:.6,minTrackingConfidence:.6,outputSegmentationMasks:false};
+      let model;const options={baseOptions:{modelAssetPath:`${__MOVANA_VISION_ROOT__}/pose_landmarker_lite.task`,delegate:'GPU'},runningMode:'VIDEO',numPoses:1,minPoseDetectionConfidence:.6,minPosePresenceConfidence:.6,minTrackingConfidence:.6,outputSegmentationMasks:false};
       try{model=await PoseLandmarker.createFromOptions(files,options);}catch{model=await PoseLandmarker.createFromOptions(files,{...options,baseOptions:{...options.baseOptions,delegate:'CPU'}});}
       if(generation!==cameraGeneration.current){model.close();return;}detector.current=model;samples.current=[];base.current=null;readyAt.current=null;cameraState('calibrating');setCalibration(0);
       let lastVideo=-1,lastInference=0,lastUi=0;

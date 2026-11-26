@@ -1,8 +1,8 @@
 import {readdir,readFile,writeFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 const entries=await readdir('dist',{recursive:true,withFileTypes:true});
-const files=entries.filter(e=>e.isFile()).map(e=>(e.parentPath+'/'+e.name).replaceAll('\\','/').replace(/^dist\//,'/')).filter(path=>path!=='/sw.js');
-const assets=files.filter(path=>!path.includes('/mediapipe/')&&!path.includes('/models/'));
+const files=entries.filter(e=>e.isFile()).map(e=>(e.parentPath+'/'+e.name).replaceAll('\\','/').replace(/^dist\//,'/')).filter(path=>path!=='/sw.js'&&!path.startsWith('/mediapipe/')&&!path.startsWith('/models/'));
+const assets=files.filter(path=>!path.startsWith('/assets/vision/'));
 const version=createHash('sha256').update(await readFile('dist/index.html')).digest('hex').slice(0,12);
 await writeFile('dist/sw.js',`const CACHE='movana-${version}';
 const CORE=${JSON.stringify(['/',...assets])};

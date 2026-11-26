@@ -87,7 +87,9 @@ def handler(event, context):
     if event.get("requestContext", {}).get("http", {}).get("method") != "POST":
         return response(405)
     headers = {name.lower(): value for name, value in (event.get("headers") or {}).items()}
-    if headers.get("origin") not in (None, ORIGIN):
+    app_domain = os.environ.get("APP_DOMAIN")
+    custom_origin = f"https://{app_domain}" if app_domain else None
+    if headers.get("origin") not in (None, ORIGIN, custom_origin):
         return response(403)
     content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if content_type != "application/json":
