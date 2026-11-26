@@ -22,7 +22,30 @@ function loadSettings(){
 export default function App(){
   const [selected,setSelected]=useState(null),[filter,setFilter]=useState('All moves'),[modal,setModal]=useState(()=>new URLSearchParams(location.search).get('privacy')==='1'?'privacy':null),[settings,setSettings]=useState(loadSettings),[install,setInstall]=useState(null);
   React.useEffect(()=>{const handler=e=>{e.preventDefault();setInstall(e);}; window.addEventListener('beforeinstallprompt',handler); return ()=>window.removeEventListener('beforeinstallprompt',handler);},[]);
-  function update(next){if('analytics'in next)setUsagePreference(next.analytics);setSettings(old=>{const value={...old,...next,...('analytics'in next?{analyticsConsent:next.analytics?CONSENT_VERSION:0}:{})};try{localStorage.setItem('movana-settings',JSON.stringify(value));}catch{}return value;});}
+  React.useEffect(()=>{
+    const onStorage=event=>{
+      if(event.storageArea!==localStorage||(event.key!==null&&event.key!=='movana-settings'))return;
+      const saved=loadSettings();
+      setUsagePreference(saved.analytics);
+      setSettings(saved);
+    };
+    window.addEventListener('storage',onStorage);
+    return ()=>window.removeEventListener('storage',onStorage);
+  },[]);
+  function update(next){
+    const changesConsent='analytics' in next;
+    const analytics=changesConsent?COLLECTION_ENABLED&&!browserOptOut()&&next.analytics===true:loadSettings().analytics;
+    const value={...settings,...next,analytics,analyticsConsent:analytics?CONSENT_VERSION:0};
+    if(changesConsent)setUsagePreference(false);
+    try{
+      localStorage.setItem('movana-settings',JSON.stringify(value));
+      if(changesConsent)setUsagePreference(analytics);
+    }catch{
+      value.analytics=false;
+      value.analyticsConsent=0;
+    }
+    setSettings(value);
+  }
   function openLesson(lesson){track('lesson_open',{lesson:lesson.id});setSelected(lesson);window.scrollTo(0,0);}
   if(selected)return <Studio lesson={selected} settings={settings} onSettings={update} onExit={()=>setSelected(null)}/>;
   return <><header className="site-header"><a className="brand" href="#" aria-label="Movana home"><Logo/></a><nav className="desktop-nav" aria-label="Main navigation"><a className="active" href="#moves">Discover</a><button onClick={()=>openLesson(lessons[0])}>Your studio</button><button onClick={()=>setModal('about')}>Our movement</button></nav><button className="icon-btn header-settings" aria-label="Your preferences" onClick={()=>setModal('settings')}><SlidersHorizontal size={21}/></button></header>

@@ -33,11 +33,15 @@ test('analytics preserves the Free subscription and established WAF rate rule', 
     RateBasedStatement: { AggregateKeyType: 'IP', Limit: 2000, EvaluationWindowSec: 300 },
   });
   assert.equal(limit.VisibilityConfig.SampledRequestsEnabled, false);
+  assert.equal(limit.VisibilityConfig.CloudWatchMetricsEnabled, true);
 });
 
 test('edge validation rejects malformed event requests before Lambda and strips unrelated data', () => {
   const source = resources.AnalyticsRequestGuard.Properties.FunctionCode['Fn::Sub'];
-  const handler = vm.runInNewContext(`${source.replaceAll('${AnalyticsEnabled}', 'true')}; handler`);
+  const edge = (enabled, domain = '') => vm.runInNewContext(`${source
+    .replaceAll('${AnalyticsEnabled}', enabled)
+    .replaceAll('${AppDomain}', domain)}; handler`);
+  const handler = edge('true');
   function event(changes = {}, headers = {}) {
     return { request: { method: 'POST', uri: '/events', querystring: { email: { value: 'not-needed' } },
       cookies: { unwanted: { value: 'not-needed' } }, headers: {
@@ -69,7 +73,10 @@ test('edge validation rejects malformed event requests before Lambda and strips 
   for (const digest of ['', 'a'.repeat(63), 'g'.repeat(64)]) {
     assert.equal(handler(event({}, { 'x-amz-content-sha256': { value: digest } })).statusCode, 400);
   }
-  const paused = vm.runInNewContext(`${source.replaceAll('${AnalyticsEnabled}', 'false')}; handler`)(event());
+  const customRequest = event({}, { origin: { value: 'https://dance.example' } });
+  assert.equal(handler(customRequest).statusCode, 403);
+  assert.equal(edge('true', 'dance.example')(customRequest).method, 'POST');
+  const paused = edge('false')(event());
   assert.equal(paused.statusCode, 204);
   assert.equal(paused.headers['cache-control'].value, 'no-store');
   assert.equal(template.Parameters.AnalyticsEnabled.Default, 'false');
@@ -145,7 +152,7 @@ test('collector can only increment this table; dashboard can only query it', () 
   }
 });
 
-test('private dashboard uses the read-only widget and only three built-in CDN metrics', () => {
+test('private dashboard uses read-only widget and aggregate AWS metrics', () => {
   assert.equal(resources.UsageDashboard.Properties.DashboardName, 'Movana-Usage');
   const dashboard = JSON.parse(resources.UsageDashboard.Properties.DashboardBody['Fn::Sub']);
   const widget = dashboard.widgets.find(item => item.type === 'custom');
@@ -153,10 +160,40 @@ test('private dashboard uses the read-only widget and only three built-in CDN me
   const metrics = dashboard.widgets.filter(item => item.type === 'metric').flatMap(item => item.properties.metrics);
   assert.deepEqual(metrics.map(metric => metric.slice(0, 2)), [
     ['AWS/CloudFront', 'Requests'], ['AWS/CloudFront', 'BytesDownloaded'], ['AWS/CloudFront', '5xxErrorRate'],
+    ['AWS/Lambda', 'Invocations'], ['AWS/DynamoDB', 'WriteThrottleEvents'], ['AWS/WAFV2', 'BlockedRequests'],
   ]);
-  assert.ok(metrics.every(metric => metric[3] === '${Distribution}' && metric[5] === 'Global'));
+  assert.ok(metrics.slice(0, 3).every(metric => metric[3] === '${Distribution}' && metric[5] === 'Global'));
   assert.ok(Object.values(resources).filter(item => item.Type === 'AWS::Lambda::Permission')
     .every(item => item.Properties.FunctionName.Ref === 'AnalyticsCollector'));
+});
+
+test('analytics alarms are opt-in and contain only aggregate service metrics', () => {
+  assert.equal(template.Parameters.AnalyticsAlarmTopicArn.Default, '');
+  for (const [name, namespace, metric] of [
+    ['AnalyticsWriteThrottleAlarm', 'AWS/DynamoDB', 'WriteThrottleEvents'],
+    ['AnalyticsInvocationAlarm', 'AWS/Lambda', 'Invocations'],
+  ]) {
+    const alarm = resources[name];
+    assert.equal(alarm.Condition, 'CreateAnalyticsAlarms');
+    assert.equal(alarm.Properties.Namespace, namespace);
+    assert.equal(alarm.Properties.MetricName, metric);
+    assert.deepEqual(alarm.Properties.AlarmActions, [{ Ref: 'AnalyticsAlarmTopicArn' }]);
+    assert.equal(alarm.Properties.TreatMissingData, 'notBreaching');
+  }
+});
+
+test('release assets are versioned and custom TLS has a compatible default branch', () => {
+  const bucket = resources.Assets;
+  assert.equal(bucket.DeletionPolicy, 'Retain');
+  assert.equal(bucket.Properties.VersioningConfiguration.Status, 'Enabled');
+  assert.equal(bucket.Properties.LifecycleConfiguration.Rules[0].NoncurrentVersionExpiration.NoncurrentDays, 30);
+  assert.equal(template.Parameters.AppDomain.Default, '');
+  assert.equal(template.Parameters.ViewerCertificateArn.Default, '');
+  const [condition, custom, defaultCertificate] = distribution.ViewerCertificate['Fn::If'];
+  assert.equal(condition, 'HasCustomDomain');
+  assert.equal(custom.MinimumProtocolVersion, 'TLSv1.2_2025');
+  assert.equal(custom.SslSupportMethod, 'sni-only');
+  assert.deepEqual(defaultCertificate, { CloudFrontDefaultCertificate: true });
 });
 
 test('CloudFormation inline Lambda sources match the reviewed Python files', async () => {

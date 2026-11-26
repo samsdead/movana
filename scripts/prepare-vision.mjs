@@ -1,13 +1,24 @@
-import {cp,mkdir,writeFile,readFile} from 'node:fs/promises';
-import {createHash} from 'node:crypto';
-await mkdir('public/models',{recursive:true});
-await cp('node_modules/@mediapipe/tasks-vision/wasm','public/mediapipe/wasm',{recursive:true});
-const model='public/models/pose_landmarker_lite.task';
-let buffer;try{buffer=await readFile(model);}catch{
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { modelName, modelSha256, sdkWasmDirectory, verifyModel, visionRoot, wasmFiles } from './vision-assets.mjs';
+
+const directory = `public/${visionRoot}`;
+const destination = `${directory}/${modelName}`;
+let model;
+for (const path of [destination, `public/models/${modelName}`]) {
+  try {
+    model = await readFile(path);
+    break;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+if (!model) {
   const response=await fetch('https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task');
   if(!response.ok)throw new Error(`Model download failed: ${response.status}`);
-  buffer=Buffer.from(await response.arrayBuffer());await writeFile(model,buffer);
+  model = Buffer.from(await response.arrayBuffer());
 }
-if(buffer.length<1_000_000)throw new Error('Model download is incomplete.');
-if(createHash('sha256').update(buffer).digest('hex')!=='59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a')throw new Error('Pose model checksum does not match the pinned asset.');
-console.log(`Local pose model: ${buffer.length} bytes; SHA256 ${createHash('sha256').update(buffer).digest('hex')}`);
+verifyModel(model);
+await mkdir(`${directory}/wasm`, { recursive: true });
+await writeFile(destination, model);
+await Promise.all(wasmFiles.map(file => copyFile(`${sdkWasmDirectory}/${file}`, `${directory}/wasm/${file}`)));
+console.log(`Prepared ${model.length} model bytes with SHA-256 ${modelSha256} and the locked MediaPipe WASM files.`);
